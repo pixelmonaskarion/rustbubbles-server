@@ -4,7 +4,7 @@ use database::Database;
 use hyper::{Response, StatusCode, Uri};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use socketioxide::{extract::{AckSender, Bin, Data, SocketRef}, SocketIo};
+use socketioxide::{extract::{Bin, Data, SocketRef}, SocketIo};
 use tokio::sync::Mutex;
 use axum::{body::Body, extract::Query, http::HeaderValue, response::IntoResponse, routing::{get, post}, Json};
 use axum::extract::Path;
@@ -15,6 +15,7 @@ mod database;
 mod structs;
 mod util;
 const UNAUTHORIZED: &str = "{\"status\":401,\"message\":\"You are not authorized to access this resource\",\"error\":{\"type\":\"Authentication Error\",\"message\":\"Unauthorized\"}}";
+const VERSION: &str = "0.0.1";
 
 fn socket_conn(socket: SocketRef) {
     
@@ -164,14 +165,24 @@ struct ServerInfo<'a> {
     detected_icloud: String,
 }
 
+#[derive(Serialize)]
+struct Statistics {
+    handles: usize,
+    messages: usize,
+    chats: usize,
+    attachments: usize,
+}
+
 fn wrap_success(json: String) -> Response<Body> {
     let mut res = format!("{{\"status\": 200, \"message\": \"Success\", \"data\": {}}}", json).into_response();
     res.headers_mut().insert("Content-Type", HeaderValue::from_str("application/json").unwrap());
     res
 }
 
-fn wrap_status(json: String, code: u32, message: String) -> String {
-    return format!("{{\"status\": {}, \"message\": \"{}\", \"data\": {}}}", code, message, json);
+fn wrap_status(json: String, code: u32, message: String) -> Response<Body> {
+    let mut res = format!("{{\"status\": {}, \"message\": \"{}\", \"data\": {}}}", code, message, json).into_response();
+    res.headers_mut().insert("Content-Type", HeaderValue::from_str("application/json").unwrap());
+    res
 }
 
 #[tokio::main]
@@ -183,6 +194,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         password: "balls",
     };
     let state_chat_guid = Arc::new(state);
+    let state_statistics = state_chat_guid.clone();
+    let state_update = state_chat_guid.clone();
     let state_chat_query = state_chat_guid.clone();
     let state_server_info = state_chat_guid.clone();
     let state_contacts = state_chat_guid.clone();
@@ -194,8 +207,30 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     io.ns("/", socket_conn);
 
     let app = axum::Router::new()
+    .route("/api/v1/ping", get(|| async move {
+        return wrap_status("\"pong\"".into(), 200, "Ping received!".into());
+    }))
+    .route("/api/v1/server/statistics/totals", get(|Query(params): Query<HashMap<String, String>>| async move {
+        let password = params.get("guid"); 
+        if password.map(|password| password != state_statistics.password).unwrap_or(true) {
+            return UNAUTHORIZED.to_string().into_response();
+        } 
+        let db = state_statistics.database.lock().await;
+        return wrap_success(serde_json::to_string(&Statistics {
+            chats: db.get_count("chat"),
+            messages: db.get_count("message"),
+            attachments: db.get_count("attachment"),
+            handles: db.get_count("handle"),
+        }).unwrap());
+    }))
+    .route("/api/v1/server/update/check", get(|Query(params): Query<HashMap<String, String>>| async move {
+        let password = params.get("guid"); 
+        if password.map(|password| password != state_update.password).unwrap_or(true) {
+            return UNAUTHORIZED.to_string().into_response();
+        } 
+        return wrap_success(format!("{{\"available\": false,\"current\": \"{VERSION}\",\"metadata\": null}}"));
+    }))
     .route("/api/v1/chat/:guid", get(|Path(guid): Path<String>, Query(params): Query<HashMap<String, String>>| async move {
-        println!("{params:?}");
         let password = params.get("guid"); 
         if password.map(|password| password != state_chat_guid.password).unwrap_or(true) {
             return UNAUTHORIZED.to_string().into_response();
@@ -206,7 +241,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         return wrap_success(serde_json::to_string(&chats).unwrap());
     }))
     .route("/api/v1/chat/query", post(|Query(params): Query<HashMap<String, String>>, Json(query): Json<ChatQuery>| async move {
-        println!("{query:?}");
         let password = params.get("guid"); 
         if password.map(|password| password != state_chat_query.password).unwrap_or(true) {
             return UNAUTHORIZED.to_string().into_response();
@@ -220,18 +254,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         if password.map(|password| password != state_chat_count.password).unwrap_or(true) {
             return UNAUTHORIZED.to_string().into_response();
         }
-        let chat_count = state_chat_count.database.lock().await.get_chat_count();
+        let chat_count = state_chat_count.database.lock().await.get_chat_service_count();
         return wrap_success(serde_json::to_string(&chat_count).unwrap());
     }))
     .route("/api/v1/server/info", get(|Query(params): Query<HashMap<String, String>>| async move {
-        println!("client got server info");
         let password = params.get("guid"); 
         if password.map(|password| password == state_server_info.password).unwrap_or(false) {
             let mut detected_icloud = String::from_utf8(Command::new("/usr/libexec/PlistBuddy").arg("-c").arg("print :Accounts:0:AccountID").arg(&format!("{}/Library/Preferences/MobileMeAccounts.plist", std::env::var("HOME").unwrap())).output().unwrap().stdout).unwrap();
             detected_icloud.remove(detected_icloud.len()-1);
             return wrap_success(serde_json::to_string(&ServerInfo {
                 os_version: String::from_utf8(Command::new("sw_vers").arg("productVersion").output().unwrap().stdout).unwrap(),
-                server_version: "0.0.1",
+                server_version: VERSION,
                 private_api: false,
                 proxy_service: "Dynamic DNS",
                 helper_connected: false,
@@ -241,7 +274,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         return UNAUTHORIZED.to_string().into_response();
     }))
     .route("/api/v1/contact", get(|Query(params): Query<HashMap<String, String>>| async move {
-        println!("client asked for contacts!");
         let password = params.get("guid"); 
         if password.map(|password| password == state_contacts.password).unwrap_or(false) {
             return "{\"status\":200,\"message\":\"Success\",\"data\":[]}".into();
@@ -259,15 +291,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         return wrap_success(serde_json::to_string(&message).unwrap());
     }))
     .route("/api/v1/chat/:guid/message", get(|Path(guid): Path<String>, Query(params): Query<HashMap<String, String>>| async move {
-        println!("chat messages {guid} {params:?}");
-        let password = params.get("guid"); 
+        println!("chat messages {} {:?}", guid, params);
+        let password = params.get("guid");
         if password.map(|password| password != state_chat_message.password).unwrap_or(true) {
             return UNAUTHORIZED.to_string().into_response();
         }
         let with = params.get("with");
-        let (chats, participants) = with.map(|with| { (with.contains("chats"), with.contains("participants")) }).unwrap_or((false, false));
+        let (attachments, handle) = with.map(|with| { (with.contains("attachments"), with.contains("participants")) }).unwrap_or((true, true));
         let limit = params.get("limit").unwrap_or(&String::from("1000")).parse().unwrap();
         let offset = params.get("offset").unwrap_or(&String::from("0")).parse().unwrap();
+        println!("{offset}");
         let sort = params.get("sort").map(|string| string.as_str()).unwrap_or("ASC");
         let after = if params.get("after") == Some(&"".to_string()) {
             0
@@ -279,8 +312,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         } else {
             unix_to_apple(params.get("before").map(|string| string.parse::<u128>().unwrap()*1000000).unwrap_or(u128::MAX))
         };
-        let message = state_chat_message.database.lock().await.get_chat_messages(guid, chats, participants, limit, offset, sort, after, before);
-        println!("{message:?}");
+        let message = state_chat_message.database.lock().await.get_chat_messages(guid, attachments, handle, offset, limit, sort, after, before);
         return wrap_success(serde_json::to_string(&message).unwrap());
     }))
     // .route("/api/v1/fcm/client", get(|Query(params): Query<HashMap<String, String>>| async move {

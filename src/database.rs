@@ -1,4 +1,4 @@
-use std::{collections::HashMap, sync::{Arc, Mutex}, time::{SystemTime, UNIX_EPOCH}};
+use std::{collections::HashMap, time::{SystemTime, UNIX_EPOCH}};
 
 use rusqlite::{Connection, OptionalExtension};
 use serde::Serialize;
@@ -70,6 +70,7 @@ impl Database {
                     is_filtered: row.get_unwrap("is_filtered"),
                     display_name: row.get_unwrap("display_name"),
                     group_id: row.get_unwrap("group_id"),
+                    last_addressed_handle: row.get_unwrap("last_addressed_handle")
                 }
         ) }).optional().unwrap();
     }
@@ -100,12 +101,13 @@ impl Database {
                     is_filtered: row.get_unwrap("is_filtered"),
                     display_name: row.get("display_name").ok(),
                     group_id: row.get_unwrap("group_id"),
+                    last_addressed_handle: row.get_unwrap("last_addressed_handle")
                 }
         ) }).unwrap().filter_map(|chat| {chat.ok()}).collect();
         return chats.split_off(offset);
     }
 
-    pub fn get_chat_count(&self) -> ChatCounts {
+    pub fn get_chat_service_count(&self) -> ChatCounts {
         let mut stmt = self.conn.prepare("SELECT service_name FROM chat").unwrap();
         let chats: Vec<_> = stmt.query_map([], |row| { 
             Ok(row.get_unwrap::<_, String>("service_name"))
@@ -114,6 +116,13 @@ impl Database {
         breakdown.insert("iMessage".to_string(), chats.clone().into_iter().filter(|service| *service == "iMessage".to_string()).collect::<Vec<_>>().len());
         breakdown.insert("SMS".to_string(), chats.clone().into_iter().filter(|service| *service == "SMS".to_string()).collect::<Vec<_>>().len());
         ChatCounts { total: chats.len(), breakdown }
+    }
+
+    pub fn get_count(&self, table: &str) -> usize {
+        let mut stmt = self.conn.prepare(&format!("SELECT COUNT(*) FROM {table}")).unwrap();
+        stmt.query_row([], |row| { 
+            Ok(row.get_unwrap::<_, usize>("COUNT(*)"))
+        }).unwrap()
     }
 
     pub fn get_chat_participants(&self, chat_row_id: u32) -> Option<Vec<Participant>> {
@@ -142,6 +151,7 @@ impl Database {
                 address: row.get("id").unwrap(),
                 country: row.get("country").unwrap(),
                 uncanonicalized_id: row.get("uncanonicalized_id").ok(),
+                service: row.get("service").unwrap(),
             })
         }).ok();
     }
@@ -162,18 +172,7 @@ impl Database {
             } else {
                 Vec::new()
             };
-            Ok(Message {
-                original_rowid,
-                guid: message_guid,
-                text: row.get_unwrap("text"),
-                date_created: apple_to_unix(row.get_unwrap::<_, usize>("date") as u128)/1000000,
-                handle: if handle { self.get_participant(row.get_unwrap("handle_id")) } else { None },
-                chat_guid,
-                attachments,
-                group_action_type: row.get_unwrap("group_action_type"),
-                item_type: row.get_unwrap("item_type"),
-                other_handle: row.get("other_handle").ok(),
-            })
+            Ok(Message::from_row(row, if handle { self.get_participant(row.get_unwrap("handle_id")) } else { None }, attachments, chat_guid, message_guid, original_rowid))
         }).ok();
     }
 
@@ -194,7 +193,7 @@ impl Database {
             Ok(Attachment {
                 original_rowid: row.get_unwrap("ROWID"),
                 guid: attachment_guid,
-                uti: row.get_unwrap("uti"),
+                uti: row.get("uti").ok(),
                 mime_type: row.get_unwrap("mime_type"),
                 transfer_state: row.get_unwrap("transfer_state"),
                 transfer_name: row.get_unwrap("transfer_name"),
@@ -237,26 +236,16 @@ impl Database {
                 let attachments = if attachments {
                     self.get_attachments_for_message(original_rowid)
                 } else {
-                    Vec::new()
+                    vec![]
                 };
-                Ok(Message {
-                    original_rowid,
-                    guid: row.get_unwrap("guid"),
-                    text: row.get_unwrap("text"),
-                    date_created: apple_to_unix(row.get_unwrap::<_, usize>("date") as u128)/1000000,
-                    handle: if handle { self.get_participant(row.get_unwrap("handle_id")) } else { None },
-                    chat_guid: chat_guid.clone(),
-                    attachments,
-                    group_action_type: row.get_unwrap("group_action_type"),
-                    item_type: row.get_unwrap("item_type"),
-                    other_handle: row.get("other_handle").ok(),
-                })
+                Ok(Message::from_row(row, if handle { self.get_participant(row.get_unwrap("handle_id")) } else { None }, attachments, chat_guid.clone(), row.get_unwrap("guid"), original_rowid))
             })
         }).ok().map(|messages| {
             let mut messages = messages.filter_map(|message| message.ok()).collect::<Vec<Message>>();
-            messages.sort_by_key(|message| message.date_created);
-            let _ = messages.split_off((offset+limit).min(messages.len()));
-            messages.split_off(limit.min(messages.len()))
+            messages.sort_by(|a, b| b.date_created.cmp(&a.date_created));
+            let mut messages = messages.split_off(offset.min(messages.len()));
+            let _ = messages.split_off(limit.min(messages.len()));
+            messages
         });
         messages
     }
@@ -295,4 +284,16 @@ impl Database {
                 })
             }).ok().flatten()
     }
+}
+
+mod test {
+    #[test]
+    fn test_slice() {
+        let mut messages = vec![0_i32, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
+        let offset = 2;
+        let limit = 3;
+        let mut messages = messages.split_off(offset.min(messages.len()));
+        let _ = messages.split_off(limit.min(messages.len()));
+        assert_eq!(messages, vec![2, 3, 4]);
+}
 }
