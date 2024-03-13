@@ -49,9 +49,9 @@ impl Database {
         return stmt.query_row([guid.clone()], |row| { 
             let original_rowid = row.get_unwrap("ROWID");
             let participants = if participants {
-                Some(self.get_chat_participants(original_rowid).unwrap())
+                self.get_chat_participants(original_rowid).unwrap()
             } else {
-                None
+                vec![]
             };
             let last_message = if last_message {
                 self.get_last_chat_message(original_rowid)
@@ -80,9 +80,9 @@ impl Database {
         let mut chats: Vec<Chat> = stmt.query_map([limit+offset], |row| {
             let original_rowid = row.get_unwrap("ROWID");
             let participants = if participants {
-                Some(self.get_chat_participants(original_rowid).unwrap())
+                self.get_chat_participants(original_rowid).unwrap()
             } else {
-                None
+                vec![]
             };
             let last_message = if last_message {
                 self.get_last_chat_message(original_rowid)
@@ -126,13 +126,10 @@ impl Database {
     }
 
     pub fn get_chat_participants(&self, chat_row_id: u32) -> Option<Vec<Participant>> {
-        let mut stmt = self.conn.prepare("SELECT * FROM chat_handle_join").unwrap();
-        return stmt.query_map([], |row| {
-            let row_id = row.get("chat_id")?;
-            if row_id == chat_row_id {
-                return Ok(self.get_participant(row_id));
-            }
-            return Ok(None);
+        let mut stmt = self.conn.prepare("SELECT handle_id FROM chat_handle_join WHERE chat_id = ?").unwrap();
+        return stmt.query_map([chat_row_id], |row| {
+            let row_id = row.get("handle_id")?;
+            return Ok(self.get_participant(row_id));
         }).ok().map(|participants| {
             participants.filter_map(|participant| {
                 if let Ok(Some(participant)) = participant {
@@ -226,6 +223,13 @@ impl Database {
         }).into_iter().collect();
     }
 
+    pub fn get_attachment_path(&self, guid: String) -> Option<String> {
+        let mut stmt = self.conn.prepare("SELECT filename FROM attachment WHERE guid = ?").unwrap();
+        stmt.query_row([guid], |row| {
+            Ok(row.get("filename").ok())
+        }).ok().flatten()
+    }
+
     pub fn get_chat_messages(&self, chat_guid: String, attachments: bool, handle: bool, offset: usize, limit: usize, sort: &str, after: u128, before: u128) -> Option<Vec<Message>> {
         //select m.* from chat c join chat_message_join as cmj on c.rowid=cmj.chat_id join message as m on cmj.message_id=m.rowid where cmj.chat_id=? AND cmj.message_date > ? and cmj.message_date < ? 
         let mut stmt = self.conn.prepare("SELECT ROWID FROM chat WHERE guid = ?").unwrap();
@@ -243,8 +247,10 @@ impl Database {
         }).ok().map(|messages| {
             let mut messages = messages.filter_map(|message| message.ok()).collect::<Vec<Message>>();
             messages.sort_by(|a, b| b.date_created.cmp(&a.date_created));
+            println!("offset {offset} limit {limit}");
             let mut messages = messages.split_off(offset.min(messages.len()));
             let _ = messages.split_off(limit.min(messages.len()));
+            println!("returning {} messages", messages.len());
             messages
         });
         messages

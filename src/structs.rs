@@ -8,7 +8,7 @@ pub struct Chat {
     #[serde(rename = "originalROWID")]
     pub original_rowid: u32,
     pub guid: String,
-    pub participants: Option<Vec<Participant>>,
+    pub participants: Vec<Participant>,
     #[serde(rename = "lastMessage")]
     pub last_message: Option<Message>,
     pub style: u32,

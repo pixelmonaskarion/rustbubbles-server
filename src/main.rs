@@ -1,12 +1,12 @@
 use std::{collections::HashMap, process::Command, sync::Arc, time::{SystemTime, UNIX_EPOCH}};
 
 use database::Database;
-use hyper::{Response, StatusCode, Uri};
+use hyper::{StatusCode, Uri};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use socketioxide::{extract::{Bin, Data, SocketRef}, SocketIo};
-use tokio::sync::Mutex;
-use axum::{body::Body, extract::Query, http::HeaderValue, response::IntoResponse, routing::{get, post}, Json};
+use tokio::{fs::File, io::AsyncReadExt, sync::Mutex};
+use axum::{body::Body, extract::Query, http::HeaderValue, response::{IntoResponse, Response}, routing::{get, post}, Json};
 use axum::extract::Path;
 
 use crate::util::unix_to_apple;
@@ -202,6 +202,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let state_chat_count = state_chat_guid.clone();
     let state_message_guid = state_chat_guid.clone();
     let state_chat_message = state_chat_guid.clone();
+    let state_attachment_download = state_chat_guid.clone();
 
     // Register a handler for the default namespace
     io.ns("/", socket_conn);
@@ -289,6 +290,25 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let (chats, participants) = with.map(|with| { (with.contains("chats"), with.contains("participants")) }).unwrap_or((false, false));
         let message = state_message_guid.database.lock().await.get_message_by_guid(guid, chats, participants);
         return wrap_success(serde_json::to_string(&message).unwrap());
+    }))
+    .route("/api/v1/attachment/:guid/download", get(|Path(guid): Path<String>, Query(params): Query<HashMap<String, String>>| async move {
+        let password = params.get("guid"); 
+        if password.map(|password| password != state_attachment_download.password).unwrap_or(true) {
+            return UNAUTHORIZED.to_string().into_response();
+        }
+        let file_name = state_attachment_download.database.lock().await.get_attachment_path(guid);
+        if let Some(file_name) = file_name {
+            let file_name = file_name.replace("~", &std::env::var("HOME").unwrap());
+            println!("{file_name:?}");
+            let mut file = File::open(file_name).await.unwrap();
+            // if let Ok(mut file) = File::open(file_name).await {
+                println!("{file:?}");
+                let mut bytes: Vec<u8> = vec![];
+                let _ = file.read_to_end(&mut bytes).await;
+                return bytes.into_response();
+            // }
+        }
+        return Response::builder().status(404).body(Body::empty()).unwrap();
     }))
     .route("/api/v1/chat/:guid/message", get(|Path(guid): Path<String>, Query(params): Query<HashMap<String, String>>| async move {
         println!("chat messages {} {:?}", guid, params);
